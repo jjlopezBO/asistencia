@@ -1,0 +1,173 @@
+﻿using NLog;
+using Ookii.Dialogs.WinForms;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace Asistencia
+{
+    public class ActualizaHorario
+    {
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
+        async static void ActualizarMarcaciones(string CodigoConsulta, string entradaNumero, string salidaNumero, string id, DateTime ingreso, DateTime salida, ApiClient apiClient, string token)
+        {
+            logger.Info("ActualizarMarcaciones / consulta:{0} / entradaNumero:{1} / salidaNumero:{2} / ingreso:{3}/salida:{4}/ id:{5}", CodigoConsulta, entradaNumero, salidaNumero, ingreso, salida, id);
+
+            string parametros = $"CodigoConsulta: {CodigoConsulta ?? "nulo"}, " +
+                               $"entradaNumero: {entradaNumero ?? "nulo"}, " +
+                               $"salidaNumero: {salidaNumero ?? "nulo"}, " +
+                               $"id: {id ?? "nulo"}, " +
+                               $"ingreso: {ingreso.ToString("yyyy-MM-dd HH:mm:ss")}, " +
+                               $"salida: {salida.ToString("yyyy-MM-dd HH:mm:ss")}";
+
+            // Aquí puedes hacer lo que necesites con el string, como por ejemplo, imprimirlo
+            Console.WriteLine(parametros);
+            var consultaRequest = new ConsultaParametrizadaRequest
+            {
+                CodigoConsulta = CodigoConsulta,
+                Modo = "JSON",
+                Parametros = new List<Parametro>
+        {
+                    new Parametro { Nombre = "CodigoEmpleado", Valor = id, Tipo = 0 },
+                    new Parametro { Nombre = entradaNumero, Valor = ingreso.ToString("yyyy-MM-dd HH:mm:ss"), Tipo = 6 },
+                    new Parametro { Nombre = salidaNumero, Valor = salida.ToString("yyyy-MM-dd HH:mm:ss"), Tipo = 6 }
+                }
+            };
+
+            string consultaResponse = await apiClient.EjecutarConsultaParametrizadaAsync(token, consultaRequest);
+
+            if (consultaResponse != null)
+            {
+                Console.WriteLine("Respuesta del API:");
+                Console.WriteLine(consultaResponse);
+                if (consultaResponse.EndsWith(":0}]}}"))
+                {
+                    int xx = 0;
+                }
+            }
+            else
+            {
+                Console.WriteLine("No se recibió respuesta del API para la consulta parametrizada.");
+            }
+        }
+
+        //Console.WriteLine($"ID: {id}, Salida: {salida}, Ingreso: {ingreso}");
+        //Console.WriteLine($"Código Empleado: {colaborador.CodigoEmpleado}");
+        //Console.WriteLine($"Unidad Organizativa: {colaborador.UnidadOrganizativa}");
+        //Console.WriteLine($"Fecha: {colaborador.Fecha}");
+        //Console.WriteLine($"EntradaEfectiva: {colaborador.EntradaEfectiva}");
+        //Console.WriteLine($"HoraaInt: {colaborador.HoraaInt()}");
+
+        static DateTime ObtenerFechaInicioPeriodo(DateTime fecha)
+        {
+            DateTime rtn = DateTime.Now;
+            if (fecha.Day < 25)
+            {
+                fecha = fecha.AddMonths(-1);
+
+            }
+            rtn = new DateTime(fecha.Year, fecha.Month, 25);
+            return rtn;
+        }
+        static string ObtenerPrimerDiaDelMesCorrespondiente(DateTime fecha)
+        {
+            // Si la fecha es del 25 o después en un mes, devolvemos el 1 del próximo mes
+            if (fecha.Day >= 25)
+            {
+                fecha = fecha.AddMonths(1);
+            }
+
+            // Devolvemos el primer día del mes correspondiente
+            DateTime primerDiaDelMes = new DateTime(fecha.Year, fecha.Month, 1);
+
+            // Devolvemos la fecha en formato yyyy-MM-dd
+            return primerDiaDelMes.ToString("yyyy-MM-dd");
+        }
+
+
+   
+public async static Task Actualizar(DateTime Inicio, DateTime Final, List<string> colaboradores)
+    {
+        var apiClient = new ApiClient();
+
+        // Crear un ProgressDialog sin botón de cancelar
+        var progressDialog = new ProgressDialog
+        {
+            WindowTitle = "Procesando",
+            Text = "Procesando registros...",
+            Description = "Por favor, espera.",
+            ShowCancelButton = false // No mostrar el botón de cancelar
+        };
+
+        // Mostrar el ProgressDialog
+        progressDialog.Show();
+
+        logger.Info("Actualizar de {0} al {1} - los elementos:{2}", Inicio, Final, string.Join(",", colaboradores));
+
+        // Datos de autenticación
+        int idEmpresa = 123;
+        string cuenta = "api_cndc";
+        string contrasena = "RI#J6ODG";
+
+        string token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+            ConsultarHorasTrabajadasResponse consultarHorasTrabajadasResponse = new ConsultarHorasTrabajadasResponse();
+        DateTime Fecha = Inicio;
+        if (token != null)
+        {
+            int contador = 10;
+            string regional = "1405";
+
+            // Calculando el total de días entre Inicio y Final para el progreso
+            int totalDias = (Final.Date - Inicio.Date).Days;
+
+            // Iterar desde Inicio hasta Final
+            while (Fecha.Date <= Final.Date)
+            {
+                logger.Info(Fecha.Date);
+                List<Asistencia> rtn = consultarHorasTrabajadasResponse.GetIngresosByFecha(Fecha, true);
+                var listaConsolidada = AsistenciaConsolidada.ConsolidarAsistencia(rtn);
+
+                TimeSpan tsmanana = TimeSpan.Zero;
+                TimeSpan tstarde = TimeSpan.Zero;
+
+                // Procesar cada colaborador
+                foreach (var colaborador in listaConsolidada)
+                {
+                    if (colaboradores.IndexOf(colaborador.CodigoEmpleado) >= 0)
+                    {
+                        if (colaborador.ModificaHorarios())
+                        {
+                            logger.Info("Modificando horario de :{0}", colaborador);
+                        }
+
+                        // Calcular porcentaje de progreso basado en los días transcurridos
+                        int progresoPorcentaje = (int)((Fecha.Date - Inicio.Date).TotalDays / totalDias * 100);
+                        progressDialog.ReportProgress( progresoPorcentaje);
+                        progressDialog.Text = $"Procesando {colaborador.CodigoEmpleado} el {Fecha.ToShortDateString()}";
+
+                        // Actualizar marcaciones (Ejemplo)
+                        await Task.Delay(TimeSpan.FromSeconds(2));
+                    }
+                }
+
+                Fecha = Fecha.AddDays(1);
+                contador++;
+                if (contador > 50)
+                {
+                    contador = 0;
+                    token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+                }
+            }
+
+            // Cerrar el ProgressDialog cuando se haya completado
+           //progressDialog.Close();
+        }
+    }
+
+
+
+}
+}
