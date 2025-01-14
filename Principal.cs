@@ -16,7 +16,7 @@ namespace Asistencia
         public Principal()
         {
             InitializeComponent();
-
+            
             btn.Enabled = false;
             Cargar();
         }
@@ -74,7 +74,7 @@ namespace Asistencia
 
             // Aquí puedes procesar los registros seleccionados
            await ActualizaHorario.Actualizar(dtpInicio.Value.Date, dtpFin.Value.Date, seleccionados);
-            MessageBox.Show("Proceso Terminado");
+           // MessageBox.Show("Proceso Terminado");
             this.Cursor = Cursors.Default;
         }
     }

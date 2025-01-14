@@ -1,5 +1,5 @@
 ﻿using NLog;
-using Ookii.Dialogs.WinForms;
+ 
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -87,87 +87,329 @@ namespace Asistencia
             return primerDiaDelMes.ToString("yyyy-MM-dd");
         }
 
-
-   
-public async static Task Actualizar(DateTime Inicio, DateTime Final, List<string> colaboradores)
-    {
-        var apiClient = new ApiClient();
-
-        // Crear un ProgressDialog sin botón de cancelar
-        var progressDialog = new ProgressDialog
+        public async static Task Actualizar(DateTime Inicio, DateTime Final, List<string> colaboradores)
         {
-            WindowTitle = "Procesando",
-            Text = "Procesando registros...",
-            Description = "Por favor, espera.",
-            ShowCancelButton = false // No mostrar el botón de cancelar
-        };
+            var apiClient = new ApiClient();
+            ProgressForm progress = new ProgressForm();
+            progress.Show();
+            logger.Info("Actualizar de {0} al {1} - los elementos:{2}", Inicio, Final, string.Join(",", colaboradores));
 
-        // Mostrar el ProgressDialog
-        progressDialog.Show();
+            int idEmpresa = 123;
+            string cuenta = "api_cndc";
+            string contrasena = "RI#J6ODG";
 
-        logger.Info("Actualizar de {0} al {1} - los elementos:{2}", Inicio, Final, string.Join(",", colaboradores));
+            string token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+            DateTime Fecha = Inicio;
 
-        // Datos de autenticación
-        int idEmpresa = 123;
-        string cuenta = "api_cndc";
-        string contrasena = "RI#J6ODG";
-
-        string token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
-            ConsultarHorasTrabajadasResponse consultarHorasTrabajadasResponse = new ConsultarHorasTrabajadasResponse();
-        DateTime Fecha = Inicio;
-        if (token != null)
-        {
-            int contador = 10;
-            string regional = "1405";
-
-            // Calculando el total de días entre Inicio y Final para el progreso
-            int totalDias = (Final.Date - Inicio.Date).Days;
-
-            // Iterar desde Inicio hasta Final
-            while (Fecha.Date <= Final.Date)
+            if (token != null)
             {
-                logger.Info(Fecha.Date);
-                List<Asistencia> rtn = consultarHorasTrabajadasResponse.GetIngresosByFecha(Fecha, true);
-                var listaConsolidada = AsistenciaConsolidada.ConsolidarAsistencia(rtn);
+                int contador = 0;
+                string regional = "1405";
+                int totalDias = (Final.Date - Inicio.Date).Days + 1;
+                int progresoActual = 0;
+                int progresoTotal = totalDias * colaboradores.Count;
 
-                TimeSpan tsmanana = TimeSpan.Zero;
-                TimeSpan tstarde = TimeSpan.Zero;
-
-                // Procesar cada colaborador
-                foreach (var colaborador in listaConsolidada)
+                while (Fecha.Date <= Final.Date)
                 {
-                    if (colaboradores.IndexOf(colaborador.CodigoEmpleado) >= 0)
+                    string periodo = ObtenerPrimerDiaDelMesCorrespondiente(Fecha);
+                    var horasTrabajadasResponse = await apiClient.ConsultarHorasTrabajadasAsync(token, regional, periodo);
+
+                    if (horasTrabajadasResponse?.Exito == true)
                     {
-                        if (colaborador.ModificaHorarios())
+                        var listaConsolidada = AsistenciaConsolidada.ConsolidarAsistencia(horasTrabajadasResponse.GetIngresosByFecha(Fecha, true));
+
+                        foreach (var colaborador in listaConsolidada)
                         {
-                            logger.Info("Modificando horario de :{0}", colaborador);
+                            if (colaboradores.Contains(colaborador.CodigoEmpleado) && colaborador.ModificaHorarios())
+                            {
+                                TimeSpan tsmanana = Fecha.Date <= new DateTime(2024, 09, 02) ? new TimeSpan(0, 30, 0) : new TimeSpan(0, 20, 0);
+                                TimeSpan tstarde = Fecha.Date <= new DateTime(2024, 09, 02) ? TimeSpan.Zero : new TimeSpan(0, 20, 0);
+
+                                colaborador.ParseHorarios(tsmanana, tstarde);
+
+                                if (colaborador.Cantidad == 1 && colaborador.CambioManana)
+                                {
+                                    string procedimiento = colaborador.EntradaProgramadaManana.Value.Hour < 12 ? "ACTUALIZAR_ENTRADA1_SALIDA1" : "ACTUALIZAR_ENTRADA2_SALIDA2";
+                                      ActualizarMarcaciones(procedimiento, "Entrada1", "Salida1", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+                                }
+                                else
+                                {
+                                    if (colaborador.CambioManana)
+                                          ActualizarMarcaciones("ACTUALIZAR_ENTRADA1_SALIDA2", "Entrada1", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+
+                                    if (colaborador.CambioTarde)
+                                          ActualizarMarcaciones("ACTUALIZAR_ENTRADA2_SALIDA2", "Entrada2", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaTarde.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+                                }
+                                progresoActual++;
+                                progress.UpdateProgress((progresoActual * 100) / progresoTotal, $"Fecha: {Fecha:dd/MM/yyyy}, Colaborador: {colaborador.CodigoEmpleado}");
+                                await Task.Delay(2000);
+                            }
                         }
+                    }
+                    else
+                    {
+                        logger.Warn($"Error consultando horas trabajadas para la fecha {Fecha:dd/MM/yyyy}");
+                    }
 
-                        // Calcular porcentaje de progreso basado en los días transcurridos
-                        int progresoPorcentaje = (int)((Fecha.Date - Inicio.Date).TotalDays / totalDias * 100);
-                        progressDialog.ReportProgress( progresoPorcentaje);
-                        progressDialog.Text = $"Procesando {colaborador.CodigoEmpleado} el {Fecha.ToShortDateString()}";
+                    Fecha = Fecha.AddDays(1);
+                    contador++;
 
-                        // Actualizar marcaciones (Ejemplo)
-                        await Task.Delay(TimeSpan.FromSeconds(2));
+                    if (contador >= 50)
+                    {
+                        token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+                        contador = 0;
                     }
                 }
-
-                Fecha = Fecha.AddDays(1);
-                contador++;
-                if (contador > 50)
-                {
-                    contador = 0;
-                    token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
-                }
             }
-
-            // Cerrar el ProgressDialog cuando se haya completado
-           //progressDialog.Close();
+            else
+            {
+                logger.Error("Error de autenticación. Token inválido.");
+            }
+            progress.UpdateProgress(100, "Proceso finalizado");
+            progress.Close();
         }
+
+        //private async static Task ActualizarMarcaciones(string procedimiento, string entrada, string salida, string codigoEmpleado, DateTime horaEntrada, DateTime horaSalida, ApiClient apiClient, string token)
+        //{
+        //    try
+        //    {
+        //        await apiClient.ActualizarMarcacionAsync(procedimiento, codigoEmpleado, horaEntrada, horaSalida, token);
+        //        logger.Info($"{procedimiento}: {codigoEmpleado} - {entrada}: {horaEntrada}, {salida}: {horaSalida}");
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        logger.Error($"Error al actualizar marcaciones para {codigoEmpleado}: {ex.Message}");
+        //    }
+        //}
+
+
+        //public async static Task Actualizar(DateTime Inicio, DateTime Final, List<string> colaboradores)
+        //{
+        //    var apiClient = new ApiClient();
+
+        //    ProgressForm progress = new ProgressForm();
+        //    progress.Show();
+        //    logger.Info("Actualizar de {0} al {1} - los elementos:{2}", Inicio, Final, string.Join(",", colaboradores));
+
+        //      // Datos de autenticación
+        //    int idEmpresa = 123;
+        //    string cuenta = "api_cndc";
+        //    string contrasena = "RI#J6ODG";
+
+        //    string token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+
+        //    DateTime Fecha = Inicio;
+        //    if (token != null)
+        //    {
+
+        //        int contador = 10;
+        //        string regional = "1405";
+        //        string periodo = ObtenerPrimerDiaDelMesCorrespondiente(Fecha);
+        //        ConsultarHorasTrabajadasResponse horasTrabajadasResponse = await apiClient.ConsultarHorasTrabajadasAsync(token, regional, periodo);
+
+        //        if (horasTrabajadasResponse != null && horasTrabajadasResponse.Exito)
+        //        {
+        //            int totalDias = (Final.Date - Inicio.Date).Days + 1; // Calculamos el total de días para el progreso
+        //            int progresoActual = 0;
+
+        //            while (Fecha.Date <= Final.Date)
+        //            {
+
+        //                progress.UpdateProgress(progresoActual, "Fecha: " + Fecha.Date);
+
+
+        //                logger.Info(Fecha.Date);
+        //                List<Asistencia> rtn = horasTrabajadasResponse.GetIngresosByFecha(Fecha, true);
+        //                var listaConsolidada = AsistenciaConsolidada.ConsolidarAsistencia(rtn);
+
+        //                TimeSpan tsmanana = TimeSpan.Zero;
+        //                TimeSpan tstarde = TimeSpan.Zero;
+        //                // Itera sobre los resultados obtenidos
+        //                foreach (var colaborador in listaConsolidada)
+        //                {
+        //                    logger.Info("Colaborador:{0}", colaborador);
+        //                    progress.UpdateProgress(progresoActual, "Fecha: " + Fecha.Date.ToShortDateString() +  " Colaborador:"+ colaborador.CodigoEmpleado);
+
+        //                    if (colaboradores.IndexOf(colaborador.CodigoEmpleado) >= 0)
+        //                    {
+        //                        if (colaborador.ModificaHorarios())
+        //                        {
+        //                            logger.Info("Modificando horario de :{0}", colaborador);
+        //                            if (Fecha.Date <= new DateTime(2024, 09, 02))
+        //                            {
+        //                                tsmanana = new TimeSpan(0, 30, 0);
+        //                                tstarde = new TimeSpan(0, 0, 0);
+        //                            }
+        //                            else
+        //                            {
+        //                                tsmanana = new TimeSpan(0, 20, 0);
+        //                                tstarde = new TimeSpan(0, 20, 0);
+        //                            }
+        //                            colaborador.ParseHorarios(tsmanana, tstarde);
+
+        //                            // Actualización de marcaciones según los cambios
+        //                            if (colaborador.Cantidad == 1)
+        //                            {
+        //                                if (colaborador.CambioManana)
+        //                                {
+        //                                    if (colaborador.EntradaProgramadaManana.Value.Hour < 12)
+        //                                    {
+        //                                        ActualizarMarcaciones("ACTUALIZAR_ENTRADA1_SALIDA1", "Entrada1", "Salida1", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                    }
+        //                                    else
+        //                                    {
+        //                                        ActualizarMarcaciones("ACTUALIZAR_ENTRADA2_SALIDA2", "Entrada2", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                    }
+        //                                }
+        //                            }
+        //                            else
+        //                            {
+        //                                if (colaborador.CambioManana)
+        //                                {
+        //                                    ActualizarMarcaciones("ACTUALIZAR_ENTRADA1_SALIDA2", "Entrada1", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                }
+        //                                if (colaborador.CambioTarde)
+        //                                {
+        //                                    ActualizarMarcaciones("ACTUALIZAR_ENTRADA2_SALIDA2", "Entrada2", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaTarde.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                }
+        //                            }
+        //                        }
+        //                        await Task.Delay(TimeSpan.FromSeconds(2));
+        //                    }
+        //                }
+
+
+        //                Fecha = Fecha.AddDays(1);
+        //                contador++;
+
+        //                // Si hemos superado el contador, renovamos el token
+        //                if (contador > 50)
+        //                {
+        //                    contador = 0;
+        //                    token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+        //                }
+        //            }
+        //        }
+        //    }
+        //    progress.UpdateProgress(100, "Fin");
+        //    progress.Close();
+
+        //}
+
+
+        //public async static Task Actualizar(DateTime Inicio, DateTime Final, List<string> colaboradores)
+        //{
+        //    var apiClient = new ApiClient();
+        //    var progressDialog = new ProgressDialog
+        //    {
+        //        WindowTitle = "Procesando",
+        //        Text = "Procesando registros...",
+        //        Description = "Por favor, espera.",
+        //        ShowCancelButton = false
+        //    };
+        //    logger.Info(" Actualizar de {0} al {1} - los elementos:{2}", Inicio, Final, string.Join(",", colaboradores));
+        //    progressDialog.Show();
+        //    // Datos de autenticación
+        //    int idEmpresa = 123;
+        //    string cuenta = "api_cndc";
+        //    string contrasena = "RI#J6ODG";
+
+        //    string token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+
+        //    DateTime Fecha = Inicio;
+        //    if (token != null)
+        //    {
+        //        int contador = 10;
+        //        string regional = "1405";
+
+
+        //        string periodo = ObtenerPrimerDiaDelMesCorrespondiente(Fecha);
+        //        ConsultarHorasTrabajadasResponse horasTrabajadasResponse = await apiClient.ConsultarHorasTrabajadasAsync(token, regional, periodo);
+        //        if (horasTrabajadasResponse != null && horasTrabajadasResponse.Exito)
+        //        {
+        //            while (Fecha.Date <= Final.Date)
+        //            {
+        //                logger.Info(Fecha.Date);
+        //                List<Asistencia> rtn = horasTrabajadasResponse.GetIngresosByFecha(Fecha, true);
+        //                var listaConsolidada = AsistenciaConsolidada.ConsolidarAsistencia(rtn);
+
+        //                TimeSpan tsmanana = TimeSpan.Zero;
+        //                TimeSpan tstarde = TimeSpan.Zero;
+        //                // Itera sobre los resultados obtenidos
+        //                foreach (var colaborador in listaConsolidada)
+        //                {
+        //                    logger.Info("Colaborador:{0}", colaborador);
+        //                    if (colaboradores.IndexOf(colaborador.CodigoEmpleado) >= 0)
+        //                    {
+
+        //                        if (colaborador.ModificaHorarios())
+        //                        {
+        //                            logger.Info("Modificando horario de :{0}", colaborador);
+        //                            if (Fecha.Date <= new DateTime(2024, 09, 02))
+        //                            {
+        //                                tsmanana = new TimeSpan(0, 30, 0);
+        //                                tstarde = new TimeSpan(0, 0, 0);
+        //                            }
+        //                            else
+        //                            {
+        //                                tsmanana = new TimeSpan(0, 20, 0);
+        //                                tstarde = new TimeSpan(0, 20, 0);
+        //                            }
+        //                            colaborador.ParseHorarios(tsmanana, tstarde);
+        //                            if (colaborador.Cantidad == 1)
+        //                            {
+        //                                if (colaborador.CambioManana)
+        //                                {
+        //                                    if (colaborador.EntradaProgramadaManana.Value.Hour < 12)
+        //                                    {
+        //                                        ActualizarMarcaciones("ACTUALIZAR_ENTRADA1_SALIDA1", "Entrada1", "Salida1", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                    }
+        //                                    else
+        //                                    {
+        //                                        ActualizarMarcaciones("ACTUALIZAR_ENTRADA2_SALIDA2", "Entrada2", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                    }
+        //                                }
+        //                            }
+        //                            else
+        //                            {
+        //                                if (colaborador.CambioManana)
+        //                                {//ACTUALIZAR_ENTRADA1_SALIDA2 - ACTUALIZAR_ENTRADA1_SALIDA1 -ACTUALIZAR_ENTRADA2_SALIDA2.
+        //                                    ActualizarMarcaciones("ACTUALIZAR_ENTRADA1_SALIDA2", "Entrada1", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaManana.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+        //                                }
+        //                                if (colaborador.CambioTarde)
+        //                                {
+        //                                    ActualizarMarcaciones("ACTUALIZAR_ENTRADA2_SALIDA2", "Entrada2", "Salida2", colaborador.CodigoEmpleado, colaborador.EntradaProgramadaTarde.Value, colaborador.SalidaProgramadaTarde.Value, apiClient, token);
+
+        //                                }
+        //                            }
+        //                        }
+        //                        await Task.Delay(TimeSpan.FromSeconds(2));
+
+        //                    }
+        //                }
+        //                Fecha = Fecha.AddDays(1);
+        //                contador++;
+        //                if (contador > 50)
+        //                {
+        //                    contador = 0;
+        //                    token = await apiClient.AutenticarAsync(idEmpresa, cuenta, contrasena);
+
+        //                }
+
+
+        //            }
+        //        }
+
+        //    }
+
+
+        //    //    string periodo = ObtenerPrimerDiaDelMesCorrespondiente(Fecha);
+
+        //    //    ConsultarHorasTrabajadasResponse horasTrabajadasResponse = await apiClient.ConsultarHorasTrabajadasAsync(token, regional, periodo);
+        //    // Fecha = DateTime.Now.Date;   
+
+
+        //}
+
     }
-
-
-
-}
 }
